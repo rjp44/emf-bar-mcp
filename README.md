@@ -14,6 +14,8 @@ possible.
 
 The paste‑into‑a‑prompt guide for the voice model is **[PROMPT.md](PROMPT.md)**.
 
+**Live instance:** `https://emf-bar-mcp-37viybmxjq-ew.a.run.app/mcp` — Cloud Run (`llm-voice`, europe‑west1), public, scale‑to‑zero. Health: [`/health`](https://emf-bar-mcp-37viybmxjq-ew.a.run.app/health).
+
 ## Quick start
 
 ```bash
