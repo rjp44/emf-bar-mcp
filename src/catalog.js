@@ -13,8 +13,8 @@ const DEPT_TAGS = {
   'Craft Keg >0.5%': ['beer', 'craft', 'keg'],
   'Craft keg ≤0.5%': ['beer', 'craft', 'keg', 'low alcohol', 'alcohol free', 'non alcoholic', 'af'],
   'Lager': ['lager', 'beer', 'pilsner', 'pils'],
-  'Real Cider': ['cider', 'real cider'],
-  'Keg Cider': ['cider', 'keg cider'],
+  'Real Cider': ['cider', 'cyder', 'real cider'],
+  'Keg Cider': ['cider', 'cyder', 'keg cider'],
   'Spirits': ['spirit', 'spirits'],
   'Snacks': ['snack', 'snacks', 'food', 'crisps'],
   'Frozen snacks': ['frozen', 'ice cream', 'snack', 'food'],
@@ -23,7 +23,7 @@ const DEPT_TAGS = {
   'Cocktail cans >0.5%': ['cocktail', 'can', 'mixed drink'],
   'Cocktail cans ≤0.5%': ['cocktail', 'can', 'alcohol free', 'non alcoholic'],
   'Soft Drink Cartons': ['soft drink', 'soft', 'non alcoholic', 'juice'],
-  'Soft Drink Prepacked': ['soft drink', 'soft', 'non alcoholic', 'pop', 'fizzy', 'cola'],
+  'Soft Drink Prepacked': ['soft drink', 'soft', 'non alcoholic', 'pop', 'fizzy'],
   'Club Mate': ['club mate', 'mate', 'soft', 'caffeine', 'non alcoholic'],
   'Wine Bottles': ['wine'],
   'Wine cans >0.5%': ['wine', 'can'],
@@ -61,6 +61,9 @@ function buildTags(st, plainNotes) {
   const present = (w) => (/[^a-z0-9]/.test(w) ? hay.includes(w) : hayWords.has(w));
   for (const w of STYLE_WORDS) if (present(w)) add(w);
   for (const w of FLAVOUR_WORDS) if (present(w)) add(w);
+  // Common brand/colloquial synonyms.
+  if (hayWords.has('cola') || hay.includes('coca cola')) ['cola', 'coke'].forEach(add);
+  if (hayWords.has('pepsi')) ['cola', 'coke', 'pepsi'].forEach(add);
 
   const abv = toNum(st.abv);
   if (abv !== null) {
@@ -236,10 +239,15 @@ function deterministicScore(drink, qToks) {
   return score;
 }
 
+// Only accept fuzzy matches up to this Fuse score. Genuine typos ("sauvignon
+// blonc" ~0.38, "cider"/"cyder" ~0.59) stay in; unrelated brands we don't stock
+// ("brewdog" ~0.80, "punk" ~0.69) fall out, so we say "no match" instead of
+// offering misleading look-alikes.
+const FUZZY_MAX_SCORE = 0.66;
 function fuzzyFallback(query, poolIds) {
   return state.fuse
     .search(query.trim())
-    .filter((r) => poolIds.has(r.item.id))
+    .filter((r) => poolIds.has(r.item.id) && (r.score ?? 1) <= FUZZY_MAX_SCORE)
     .map((r) => ({ drink: getDrinkById(r.item.id), score: 1 - (r.score ?? 1) }));
 }
 

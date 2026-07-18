@@ -73,6 +73,71 @@ export function registerTools(server) {
     },
   );
 
+  // 1b) opening_hours ------------------------------------------------------
+  server.registerTool(
+    'opening_hours',
+    {
+      title: 'Bar opening hours',
+      description:
+        'Whether the bar is open right now and, if not, when it next opens — plus today\'s closing time and the upcoming schedule. Use for "is the bar open?", "when do you open / close?", "what time do you shut?". Note: EMF publishes ONE site-wide bar schedule (the main Robot Arms licence); the other bars broadly follow it and are not listed separately, so the answer is the same whichever bar is asked about.',
+      inputSchema: {
+        bar: z.string().optional().describe('Optional bar name. The schedule is site-wide, so the times are the same; a note is added for non-main bars.'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ bar }) => {
+      const barObj = bar ? resolveBar(bar) : null;
+      let sessions = [];
+      let checkedAt = new Date().toISOString();
+      let isLive = false;
+      try {
+        const r = await liveSessions();
+        sessions = r.value;
+        checkedAt = new Date(r.at).toISOString();
+        isLive = true;
+      } catch { /* fall through to no-data */ }
+      if (!sessions.length) {
+        return ok("I don't have the bar opening times right now.", { open: null, source: 'unavailable' });
+      }
+      const now = Date.now();
+      const at = (s) => new Date(s).getTime();
+      const status = sessionStatus(sessions, now);
+      const schedule = sessions
+        .filter((s) => at(s.closing_time) > now)
+        .slice(0, 4)
+        .map((s) => ({
+          day: weekday(s.opening_time),
+          open: clock(s.opening_time),
+          close: clock(s.closing_time),
+          opensAt: s.opening_time,
+          closesAt: s.closing_time,
+        }));
+
+      let text;
+      if (status.open === true) {
+        text = `The bar is open now until ${clock(status.closingTime)}.`;
+      } else if (status.openingTime) {
+        text = `The bar is closed. It next opens ${weekday(status.openingTime)} at ${clock(status.openingTime)}.`;
+      } else {
+        text = 'The bar is closed for the rest of the event.';
+      }
+      const barNote = barObj && barObj.slug !== 'robotarms'
+        ? ` (These are the site's published bar hours; ${barObj.name} broadly follows them but isn't listed separately.)`
+        : '';
+      const staleTail = isLive ? '' : ' (schedule from last refresh)';
+      return ok(text + barNote + staleTail, {
+        bar: barObj?.slug || null,
+        open: status.open,
+        closesAt: status.open ? status.closingTime : null,
+        nextOpen: status.open ? null : status.openingTime || null,
+        schedule,
+        scope: 'site-wide (main-bar licence; not per-bar)',
+        source: isLive ? 'live' : 'cache',
+        checkedAt,
+      });
+    },
+  );
+
   // 2) find_drinks ----------------------------------------------------------
   server.registerTool(
     'find_drinks',

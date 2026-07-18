@@ -52,10 +52,11 @@ docker run -p 8787:8787 emf-bar-mcp
 
 | Tool | Args | Live call? | Returns |
 |------|------|-----------|---------|
-| `list_bars` | — | no | The 3 bars (slug, name, drink count, map link) + open/closed now |
+| `list_bars` | — | no | The 3 bars (slug, name, drink count, map link) |
 | `find_drinks` | `query` (1–2 keywords), `bar?`, `category?`, `include_unavailable?`, `limit?` | no | Ranked drinks: `id`, `name`, `abv`, `price`, `category`, `bars`, dietary flags |
 | `check_stock` | `drink` (name or `id`), `bar?` | **1** | `inStock`, `level`, `servingsRemaining`+`servingUnit`, `percentRemaining`, `containerPercentRemaining` (cask/keg), `price`, `bars`, plus `source`/`live`/`checkedAt` freshness |
 | `whats_on_tap` | `bar?` | **1** (cached) | Casks/kegs/ciders pouring now, each with `remainingPct` / `level` |
+| `opening_hours` | `bar?` | **1** (cached) | `open`, `closesAt`/`nextOpen`, upcoming `schedule`. Site-wide schedule (EMF publishes no per-bar hours) |
 
 Every tool returns a short spoken‑style `content` string **and** machine‑readable
 `structuredContent`. `check_stock` returns a `candidates` list when a name is ambiguous.

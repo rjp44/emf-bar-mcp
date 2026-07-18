@@ -11,8 +11,10 @@ export function createServer() {
       instructions:
         'Tools for the EMF Camp bars. Discovery flow for a voice assistant: ' +
         'find_drinks (fuzzy keyword search of the menu, cheap) -> check_stock (live stock for the chosen drink). ' +
-        'Use whats_on_tap for "what beer/cider is on now", and list_bars for the bar names and open/closed status. ' +
-        'Bars: Robot Arms (main), Cybar (Null Sector), SpaceBAR (cans/bottles only).',
+        'Use whats_on_tap for "what beer/cider is on now", opening_hours for "is the bar open / when does it open", ' +
+        'and list_bars for the bar names. Bars: Robot Arms (main), Cybar (Null Sector), SpaceBAR (cans/bottles only). ' +
+        'IMPORTANT: only ever name drinks, breweries, prices and ABVs that appear in a tool result — never offer a ' +
+        'drink from your own knowledge (e.g. famous brands). If a drink is not returned by a tool, it is not stocked here.',
     },
   );
   registerTools(server);
