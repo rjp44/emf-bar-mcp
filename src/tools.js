@@ -33,7 +33,8 @@ const dto = (d) => ({
   priceLabel: money(d.price),
   category: d.category,
   bars: d.bars,
-  available: d.available,
+  onSale: d.available,            // on sale / buyable now (has a place to buy it)
+  available: d.available,         // alias, kept for compatibility
   ...(d.dietary?.glutenFree ? { glutenFree: true } : {}),
   ...(d.dietary?.vegan ? { vegan: true } : {}),
 });
@@ -144,12 +145,12 @@ export function registerTools(server) {
     {
       title: 'Find drinks',
       description:
-        'Fuzzy-search the drinks menu by one or two keywords (e.g. "hoppy", "cider", "gin", "alcohol free", "Ledbury"). Optional bar and category filters. Returns a short ranked list from the cached menu — no live stock check, so it is fast and cheap. Use check_stock afterwards to confirm a specific drink is pouring.',
+        'Fuzzy-search the drinks menu by one or two keywords (e.g. "hoppy", "cider", "gin", "alcohol free", "Ledbury"). Optional bar and category filters. Returns a short ranked list from the cached menu — no live stock check, so it is fast and cheap. By default only drinks ON SALE now are returned; set include_unavailable to also list drinks that are in stock but not currently on sale (e.g. a cask waiting to be tapped) — those are tagged "in stock, not on sale". Use check_stock afterwards to confirm a specific drink.',
       inputSchema: {
         query: z.string().describe('One or two keywords: a style, name, brewery, or category.'),
         bar: z.string().optional().describe('Limit to a bar: "Robot Arms", "Cybar"/"Null Sector", or "SpaceBAR".'),
         category: z.string().optional().describe('Optional category word, e.g. beer, cider, wine, spirits, soft.'),
-        include_unavailable: z.boolean().optional().describe('Include drinks not currently on the bar (default false).'),
+        include_unavailable: z.boolean().optional().describe('Also include drinks in stock but not currently on sale (e.g. a cask not yet tapped). Default false.'),
         limit: z.number().int().min(1).max(15).optional().describe('Max results (default 5).'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -165,7 +166,11 @@ export function registerTools(server) {
           { query, bar: barObj?.slug || null, count: 0, drinks: [] },
         );
       }
-      const items = drinks.map((d) => `${label(d)} (${abvBit(d)}, ${money(d.price)}${barObj ? '' : `, ${d.bars.join('/')}`})`);
+      const items = drinks.map((d) => {
+        if (!d.available) return `${label(d)} (${abvBit(d)}, ${money(d.price)}) — in stock, not on sale`;
+        const wh = barObj ? '' : `, ${d.bars.join('/')}`;
+        return `${label(d)} (${abvBit(d)}, ${money(d.price)}${wh})`;
+      });
       const text = `${drinks.length} match${drinks.length > 1 ? 'es' : ''}${where} for "${query}": ${items.join('; ')}.`;
       return ok(text, {
         query,
@@ -226,7 +231,14 @@ export function registerTools(server) {
       const frac = baseBought > 0 ? baseRemaining / baseBought : baseRemaining > 0 ? 1 : 0;
       const level = levelWord(frac);
       const servings = servingsLeft({ ...match, baseRemaining });
-      const inStock = baseRemaining > 0 && lines.length > 0;
+      // Three distinct states (matches how EMF's price list works — "not all
+      // draught beers/ciders are on sale at the same time"):
+      //   on_sale             — stock remaining AND a place to buy it now (a stockline)
+      //   in_stock_not_on_sale — stock remaining but not on any pump/shelf right now
+      //   out_of_stock        — nothing left
+      const hasStock = baseRemaining > 0;
+      const onSale = hasStock && lines.length > 0;
+      const status = onSale ? 'on_sale' : hasStock ? 'in_stock_not_on_sale' : 'out_of_stock';
       const barsNow = [...new Set(lines.map((l) => l.barName))];
       const percentRemaining = baseBought > 0 ? Math.round(frac * 100) : null;
 
@@ -246,7 +258,11 @@ export function registerTools(server) {
       const priceTail = match.price != null ? ` ${money(match.price)} a ${match.saleUnit}.` : '';
       const checkedAt = new Date(dataAt).toISOString();
       const structured = {
-        found: true, id: match.id, name: label(match), inStock, level,
+        found: true, id: match.id, name: label(match),
+        status,                    // on_sale | in_stock_not_on_sale | out_of_stock
+        onSale,                    // can a customer buy it right now?
+        inStock: hasStock,         // is there any stock at all (may be in the cellar)?
+        level,
         // How much is left, expressed the way this product is sold:
         servingsRemaining: servings?.count ?? null,   // approx count in sale units
         servingUnit: servings?.unit ?? null,          // e.g. "pints", "330ml cans", "75cl bottles"
@@ -260,11 +276,15 @@ export function registerTools(server) {
       };
       const staleTail = isLive ? '' : ` (last refreshed ${clock(checkedAt)}, live check unavailable)`;
 
-      if (!inStock) {
-        const msg = baseRemaining > 0
-          ? `${label(match)} is in stock but not currently on the bar.`
-          : `${label(match)} is out of stock right now.`;
-        return ok(msg + staleTail, structured);
+      if (!hasStock) {
+        return ok(`${label(match)} is out of stock — none left.${staleTail}`, structured);
+      }
+      if (!onSale) {
+        // In stock (often a cask/keg in the cellar) but not on a pump right now.
+        return ok(
+          `${label(match)} isn't on sale right now — they have it in stock but it's not on a pump or the bar at the moment. It may come on later; ask the bar staff, or I can tell you what's on now.${staleTail}`,
+          structured,
+        );
       }
       if (barObj && !match.barSlugs.includes(barObj.slug) && !lines.some((l) => l.barSlug === barObj.slug)) {
         return ok(
