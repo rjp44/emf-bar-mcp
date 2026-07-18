@@ -1,0 +1,23 @@
+{
+  "name": "emf-bar-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for the EMF Camp bar API — voice-friendly drink discovery and live stock.",
+  "type": "module",
+  "bin": {
+    "emf-bar-mcp": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "stdio": "MCP_TRANSPORT=stdio node src/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "express": "^5.2.1",
+    "fuse.js": "^7.5.0",
+    "zod": "^4.4.3"
+  }
+}

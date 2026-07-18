@@ -1,0 +1,267 @@
+// The four voice-friendly tools. Every handler returns a short spoken-style
+// `content` string plus machine-readable `structuredContent`.
+import { z } from 'zod';
+import { searchDrinks, resolveDrink, resolveBar, listBars } from './catalog.js';
+import { liveStocktype, liveOnTap, liveSessions, sessionStatus } from './liveStock.js';
+import { toNum, levelWord, servingsLeft, money, clock, weekday } from './format.js';
+
+// Departments that can appear "on tap" (casks / kegs / draught cider). Only for
+// these is the extra on-tap call worthwhile when checking stock.
+const TAP_DEPTS = new Set([10, 20, 22, 25, 30, 35]);
+
+// --- small presentation helpers ---------------------------------------------
+const label = (d) => {
+  const m = (d.manufacturer || d.producer || '').trim();
+  const name = d.name || '';
+  if (!m || name.toLowerCase().startsWith(m.toLowerCase())) return name;
+  return `${m} ${name}`;
+};
+const abvBit = (d) => (d.abv || d.abv === 0 ? `${d.abv}%` : d.category || '');
+const ok = (text, structured) => ({
+  content: [{ type: 'text', text }],
+  structuredContent: structured,
+});
+const listAnd = (arr) =>
+  arr.length <= 1 ? arr.join('') : `${arr.slice(0, -1).join(', ')} and ${arr[arr.length - 1]}`;
+
+// Compact drink DTO for discovery results.
+const dto = (d) => ({
+  id: d.id,
+  name: label(d),
+  abv: d.abv,
+  price: d.price,
+  priceLabel: money(d.price),
+  category: d.category,
+  bars: d.bars,
+  available: d.available,
+  ...(d.dietary?.glutenFree ? { glutenFree: true } : {}),
+  ...(d.dietary?.vegan ? { vegan: true } : {}),
+});
+
+export function registerTools(server) {
+  // 1) list_bars ------------------------------------------------------------
+  server.registerTool(
+    'list_bars',
+    {
+      title: 'List bars',
+      description:
+        'List the EMF bars (Robot Arms / main, Cybar / Null Sector, SpaceBAR) and whether the bar is open right now. Call this to know the valid bar names before filtering by bar.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async () => {
+      const bars = listBars();
+      let status = { open: null };
+      try {
+        status = sessionStatus(await liveSessions());
+      } catch { /* sessions optional */ }
+      const barText = bars
+        .map((b) => `${b.name}${b.slug === 'robotarms' ? ' (main bar)' : b.slug === 'cybar' ? ' (Null Sector)' : ''}`)
+        .join(', ');
+      const openText =
+        status.open === true
+          ? ` The bar is open now until ${clock(status.closingTime)}.`
+          : status.open === false && status.openingTime
+            ? ` The bar is closed; it next opens ${weekday(status.openingTime)} ${clock(status.openingTime)}.`
+            : '';
+      return ok(`${bars.length} bars: ${barText}.${openText}`, {
+        bars: bars.map((b) => ({ slug: b.slug, name: b.name, drinkCount: b.drinkCount, maplink: b.maplink })),
+        open: status.open,
+        closingTime: status.closingTime || null,
+        nextOpening: status.openingTime || null,
+      });
+    },
+  );
+
+  // 2) find_drinks ----------------------------------------------------------
+  server.registerTool(
+    'find_drinks',
+    {
+      title: 'Find drinks',
+      description:
+        'Fuzzy-search the drinks menu by one or two keywords (e.g. "hoppy", "cider", "gin", "alcohol free", "Ledbury"). Optional bar and category filters. Returns a short ranked list from the cached menu — no live stock check, so it is fast and cheap. Use check_stock afterwards to confirm a specific drink is pouring.',
+      inputSchema: {
+        query: z.string().describe('One or two keywords: a style, name, brewery, or category.'),
+        bar: z.string().optional().describe('Limit to a bar: "Robot Arms", "Cybar"/"Null Sector", or "SpaceBAR".'),
+        category: z.string().optional().describe('Optional category word, e.g. beer, cider, wine, spirits, soft.'),
+        include_unavailable: z.boolean().optional().describe('Include drinks not currently on the bar (default false).'),
+        limit: z.number().int().min(1).max(15).optional().describe('Max results (default 5).'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ query, bar, category, include_unavailable, limit }) => {
+      const { bar: barObj, drinks } = searchDrinks(query, {
+        bar, category, includeUnavailable: !!include_unavailable, limit: limit || 5,
+      });
+      const where = barObj ? ` at ${barObj.name}` : '';
+      if (drinks.length === 0) {
+        return ok(
+          `No drinks match "${query}"${where}. Try a broader word like beer, cider, wine, spirits, or soft drink.`,
+          { query, bar: barObj?.slug || null, count: 0, drinks: [] },
+        );
+      }
+      const items = drinks.map((d) => `${label(d)} (${abvBit(d)}, ${money(d.price)}${barObj ? '' : `, ${d.bars.join('/')}`})`);
+      const text = `${drinks.length} match${drinks.length > 1 ? 'es' : ''}${where} for "${query}": ${items.join('; ')}.`;
+      return ok(text, {
+        query,
+        bar: barObj?.slug || null,
+        count: drinks.length,
+        drinks: drinks.map(dto),
+      });
+    },
+  );
+
+  // 3) check_stock ----------------------------------------------------------
+  server.registerTool(
+    'check_stock',
+    {
+      title: 'Check stock',
+      description:
+        'Check LIVE stock for one specific drink (by name or the id from find_drinks), optionally at a specific bar. Makes one real-time upstream call. Returns whether it is in stock, roughly how much is left, the bar(s) serving it, and the price. If the name is ambiguous it returns a short list to choose from.',
+      inputSchema: {
+        drink: z.string().describe('Drink name or the numeric id from find_drinks.'),
+        bar: z.string().optional().describe('Optional bar to check: "Robot Arms", "Cybar"/"Null Sector", or "SpaceBAR".'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ drink, bar }) => {
+      const { match, candidates } = resolveDrink(drink);
+      const barObj = bar ? resolveBar(bar) : null;
+      if (!match) {
+        if (candidates.length) {
+          return ok(`Did you mean: ${listAnd(candidates.map(label))}? Say which one.`, {
+            ambiguous: true, candidates: candidates.map(dto),
+          });
+        }
+        return ok(`I couldn't find a drink like "${drink}". Try find_drinks first.`, { found: false });
+      }
+
+      // One live upstream call for fresh stock + current placement.
+      let live;
+      try {
+        live = await liveStocktype(match.id);
+      } catch {
+        live = null;
+      }
+      const baseRemaining = live ? toNum(live.base_units_remaining) ?? 0 : match.baseRemaining;
+      const baseBought = (live ? toNum(live.base_units_bought) : null) ?? match.baseBought;
+      const rawLines = live?.stocklines || match.lines.map((l) => ({
+        name: l.line, linetype: l.linetype, location_display: { slug: l.barSlug, name: l.barName },
+      }));
+      const lines = rawLines.map((sl) => ({
+        line: sl.name,
+        linetype: sl.linetype,
+        barSlug: sl.location_display?.slug || 'unknown',
+        barName: sl.location_display?.name || 'Unknown',
+      }));
+      const frac = baseBought > 0 ? baseRemaining / baseBought : baseRemaining > 0 ? 1 : 0;
+      const level = levelWord(frac);
+      const servings = servingsLeft({ ...match, baseRemaining });
+      const inStock = baseRemaining > 0 && lines.length > 0;
+      const barsNow = [...new Set(lines.map((l) => l.barName))];
+
+      // Cask enrichment: % left of the connected container, if on tap. Only
+      // worth the extra call for draught departments (ales/kegs/ciders).
+      let caskPct = null;
+      if (TAP_DEPTS.has(match.departmentId)) {
+        try {
+          const onTap = await liveOnTap();
+          const hit = onTap
+            .filter((t) => t.stocktypeId === match.id && (!barObj || t.barSlug === barObj.slug))
+            .sort((a, b) => (b.remainingPct || 0) - (a.remainingPct || 0))[0];
+          if (hit) caskPct = hit.remainingPct;
+        } catch { /* on-tap optional */ }
+      }
+
+      const priceTail = match.price != null ? ` ${money(match.price)} a ${match.saleUnit}.` : '';
+      const structured = {
+        found: true, id: match.id, name: label(match), inStock, level,
+        servingsLeft: servings?.count ?? null, servingUnit: servings?.unit ?? null,
+        caskRemainingPct: caskPct, price: match.price, priceLabel: money(match.price),
+        abv: match.abv, category: match.category, bars: barsNow,
+        lines: lines.map((l) => ({ line: l.line, bar: l.barName })),
+      };
+
+      if (!inStock) {
+        const msg = baseRemaining > 0
+          ? `${label(match)} is in stock but not currently on the bar.`
+          : `${label(match)} is out of stock right now.`;
+        return ok(msg, structured);
+      }
+      if (barObj && !match.barSlugs.includes(barObj.slug) && !lines.some((l) => l.barSlug === barObj.slug)) {
+        return ok(
+          `${label(match)} isn't at ${barObj.name} right now. It's on at ${listAnd(barsNow)}.${priceTail}`,
+          structured,
+        );
+      }
+      const atLines = barObj ? lines.filter((l) => l.barSlug === barObj.slug) : lines;
+      // Only physical cask/pump identifiers are useful to speak; continuous
+      // lines are usually just named after the product, which is noise.
+      const lineNames = [...new Set(atLines.filter((l) => l.linetype === 'regular').map((l) => l.line))].filter(Boolean);
+      const whereNow = barObj ? barObj.name : listAnd(barsNow);
+      const levelPhrase = level === 'plenty' ? 'plenty left' : level === 'ok' ? 'a fair bit left' : level === 'low' ? 'running low' : 'in stock';
+      const caskTail = caskPct != null ? `, ~${Math.round(caskPct)}% of the cask left` : servings ? `, ${servings.phrase}` : '';
+      const lineTail = lineNames.length ? ` (${lineNames.join(', ')})` : '';
+      return ok(
+        `Yes — ${label(match)} is on at ${whereNow}${lineTail}: ${levelPhrase}${caskTail}.${priceTail}`,
+        structured,
+      );
+    },
+  );
+
+  // 4) whats_on_tap ---------------------------------------------------------
+  server.registerTool(
+    'whats_on_tap',
+    {
+      title: "What's on tap",
+      description:
+        'List the cask ales, kegs and ciders pouring RIGHT NOW, with live "how full" levels. Optional bar filter. Robot Arms and Cybar have taps; SpaceBAR is cans/bottles only (use find_drinks for it).',
+      inputSchema: {
+        bar: z.string().optional().describe('Optional bar: "Robot Arms" or "Cybar"/"Null Sector".'),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    async ({ bar }) => {
+      const barObj = bar ? resolveBar(bar) : null;
+      if (barObj?.slug === 'spacebar') {
+        return ok('SpaceBAR serves cans and bottles, nothing on tap. Use find_drinks to see what it stocks.', {
+          bar: 'spacebar', onTap: [],
+        });
+      }
+      let items = [];
+      try {
+        items = await liveOnTap();
+      } catch {
+        return ok('The live tap list is unavailable right now. Try find_drinks instead.', { onTap: [] });
+      }
+      if (barObj) items = items.filter((t) => t.barSlug === barObj.slug);
+      if (items.length === 0) {
+        return ok(`Nothing is on tap${barObj ? ` at ${barObj.name}` : ''} right now.`, { onTap: [] });
+      }
+      const byBar = new Map();
+      for (const t of items) {
+        if (!byBar.has(t.barName)) byBar.set(t.barName, []);
+        byBar.get(t.barName).push(t);
+      }
+      const parts = [];
+      for (const [barName, list] of byBar) {
+        const bits = list.map((t) => {
+          const pct = t.remainingPct != null ? `, ${Math.round(t.remainingPct)}%` : '';
+          const a = t.abv != null ? `, ${t.abv}%` : '';
+          return `${label(t)} (${t.kind}${a}${pct})`;
+        });
+        parts.push(`${barName}: ${bits.join('; ')}`);
+      }
+      return ok(`On tap now — ${parts.join('. ')}.`, {
+        bar: barObj?.slug || null,
+        onTap: items.map((t) => ({
+          name: label(t), kind: t.kind, bar: t.barName, abv: t.abv,
+          price: t.price, priceLabel: money(t.price),
+          remainingPct: t.remainingPct != null ? Math.round(t.remainingPct) : null,
+          level: levelWord(t.remainingPct != null ? t.remainingPct / 100 : null),
+          id: t.stocktypeId,
+        })),
+      });
+    },
+  );
+}

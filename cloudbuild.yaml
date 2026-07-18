@@ -1,0 +1,40 @@
+# Reproducible build + deploy pipeline for Cloud Build.
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_REGION=europe-west1
+# Builds the image with the Dockerfile, pushes to Artifact Registry, and
+# deploys to Cloud Run. (The initial deploy in this repo was done with
+# `gcloud run deploy --source .`, which also runs Cloud Build; this file is the
+# explicit pipeline for CI / repeat deploys.)
+substitutions:
+  _SERVICE: emf-bar-mcp
+  _REGION: europe-west1
+  _REPO: cloud-run-source-deploy
+options:
+  logging: CLOUD_LOGGING_ONLY
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA'
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -t
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA'
+      - .
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA'
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - '${_SERVICE}'
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --port=8787
+      - --allow-unauthenticated
