@@ -1,7 +1,7 @@
 // The four voice-friendly tools. Every handler returns a short spoken-style
 // `content` string plus machine-readable `structuredContent`.
 import { z } from 'zod';
-import { searchDrinks, resolveDrink, resolveBar, listBars } from './catalog.js';
+import { searchDrinks, resolveDrink, resolveBar, listBars, getState } from './catalog.js';
 import { liveStocktype, liveOnTap, liveSessions, sessionStatus } from './liveStock.js';
 import { toNum, levelWord, servingsLeft, money, clock, weekday } from './format.js';
 
@@ -53,7 +53,7 @@ export function registerTools(server) {
       const bars = listBars();
       let status = { open: null };
       try {
-        status = sessionStatus(await liveSessions());
+        status = sessionStatus((await liveSessions()).value);
       } catch { /* sessions optional */ }
       const barText = bars
         .map((b) => `${b.name}${b.slug === 'robotarms' ? ' (main bar)' : b.slug === 'cybar' ? ' (Null Sector)' : ''}`)
@@ -117,7 +117,7 @@ export function registerTools(server) {
     {
       title: 'Check stock',
       description:
-        'Check LIVE stock for one specific drink (by name or the id from find_drinks), optionally at a specific bar. Makes one real-time upstream call. Returns whether it is in stock, roughly how much is left, the bar(s) serving it, and the price. If the name is ambiguous it returns a short list to choose from.',
+        'Check LIVE stock for one specific drink (by name or the id from find_drinks), optionally at a specific bar. Makes one real-time upstream call. Returns: inStock; how much is left as a real quantity — servingsRemaining + servingUnit (e.g. 52 pints, 30 bottles, 24 cans), percentRemaining, and containerPercentRemaining for a cask/keg on tap; a coarse level (plenty/ok/low/out); the bar(s) serving it; the price; and freshness (source "live" vs "cache" with checkedAt). Cite the quantity when you answer. If the name is ambiguous it returns a short list to choose from.',
       inputSchema: {
         drink: z.string().describe('Drink name or the numeric id from find_drinks.'),
         bar: z.string().optional().describe('Optional bar to check: "Robot Arms", "Cybar"/"Null Sector", or "SpaceBAR".'),
@@ -137,12 +137,16 @@ export function registerTools(server) {
       }
 
       // One live upstream call for fresh stock + current placement.
-      let live;
+      let live = null;
+      let dataAt = getState().loadedAt?.getTime() ?? Date.now(); // fallback: catalog age
+      let isLive = false;
       try {
-        live = await liveStocktype(match.id);
-      } catch {
-        live = null;
-      }
+        const res = await liveStocktype(match.id);
+        live = res.value;
+        dataAt = res.at;
+        isLive = true;
+      } catch { /* upstream down: fall back to cached catalog figures */ }
+
       const baseRemaining = live ? toNum(live.base_units_remaining) ?? 0 : match.baseRemaining;
       const baseBought = (live ? toNum(live.base_units_bought) : null) ?? match.baseBought;
       const rawLines = live?.stocklines || match.lines.map((l) => ({
@@ -159,13 +163,14 @@ export function registerTools(server) {
       const servings = servingsLeft({ ...match, baseRemaining });
       const inStock = baseRemaining > 0 && lines.length > 0;
       const barsNow = [...new Set(lines.map((l) => l.barName))];
+      const percentRemaining = baseBought > 0 ? Math.round(frac * 100) : null;
 
       // Cask enrichment: % left of the connected container, if on tap. Only
       // worth the extra call for draught departments (ales/kegs/ciders).
       let caskPct = null;
       if (TAP_DEPTS.has(match.departmentId)) {
         try {
-          const onTap = await liveOnTap();
+          const onTap = (await liveOnTap()).value;
           const hit = onTap
             .filter((t) => t.stocktypeId === match.id && (!barObj || t.barSlug === barObj.slug))
             .sort((a, b) => (b.remainingPct || 0) - (a.remainingPct || 0))[0];
@@ -174,19 +179,27 @@ export function registerTools(server) {
       }
 
       const priceTail = match.price != null ? ` ${money(match.price)} a ${match.saleUnit}.` : '';
+      const checkedAt = new Date(dataAt).toISOString();
       const structured = {
         found: true, id: match.id, name: label(match), inStock, level,
-        servingsLeft: servings?.count ?? null, servingUnit: servings?.unit ?? null,
-        caskRemainingPct: caskPct, price: match.price, priceLabel: money(match.price),
+        // How much is left, expressed the way this product is sold:
+        servingsRemaining: servings?.count ?? null,   // approx count in sale units
+        servingUnit: servings?.unit ?? null,          // e.g. "pints", "330ml cans", "75cl bottles"
+        percentRemaining,                             // 0–100 of the total bought (coarse)
+        containerPercentRemaining: caskPct != null ? Math.round(caskPct) : null, // cask/keg on tap
+        price: match.price, priceLabel: money(match.price),
         abv: match.abv, category: match.category, bars: barsNow,
         lines: lines.map((l) => ({ line: l.line, bar: l.barName })),
+        // Freshness so the agent can describe the figure accurately:
+        source: isLive ? 'live' : 'cache', live: isLive, checkedAt,
       };
+      const staleTail = isLive ? '' : ` (last refreshed ${clock(checkedAt)}, live check unavailable)`;
 
       if (!inStock) {
         const msg = baseRemaining > 0
           ? `${label(match)} is in stock but not currently on the bar.`
           : `${label(match)} is out of stock right now.`;
-        return ok(msg, structured);
+        return ok(msg + staleTail, structured);
       }
       if (barObj && !match.barSlugs.includes(barObj.slug) && !lines.some((l) => l.barSlug === barObj.slug)) {
         return ok(
@@ -199,11 +212,19 @@ export function registerTools(server) {
       // lines are usually just named after the product, which is noise.
       const lineNames = [...new Set(atLines.filter((l) => l.linetype === 'regular').map((l) => l.line))].filter(Boolean);
       const whereNow = barObj ? barObj.name : listAnd(barsNow);
-      const levelPhrase = level === 'plenty' ? 'plenty left' : level === 'ok' ? 'a fair bit left' : level === 'low' ? 'running low' : 'in stock';
-      const caskTail = caskPct != null ? `, ~${Math.round(caskPct)}% of the cask left` : servings ? `, ${servings.phrase}` : '';
+      const levelPhrase = level === 'plenty' ? 'plenty left' : level === 'ok' ? 'a fair bit left' : level === 'low' ? 'running low' : 'low stock';
+      // Always cite a concrete number: cask % if on tap, else a serving count,
+      // else fall back to a percentage of stock.
+      const quantity = caskPct != null
+        ? `~${Math.round(caskPct)}% of the cask left`
+        : servings && servings.count > 0
+          ? `${servings.phrase} left`
+          : percentRemaining != null
+            ? `about ${percentRemaining}% of stock left`
+            : 'some left';
       const lineTail = lineNames.length ? ` (${lineNames.join(', ')})` : '';
       return ok(
-        `Yes — ${label(match)} is on at ${whereNow}${lineTail}: ${levelPhrase}${caskTail}.${priceTail}`,
+        `Yes — ${label(match)} is on at ${whereNow}${lineTail}: ${levelPhrase}, ${quantity}.${priceTail}${staleTail}`,
         structured,
       );
     },
@@ -229,14 +250,17 @@ export function registerTools(server) {
         });
       }
       let items = [];
+      let checkedAt = new Date().toISOString();
       try {
-        items = await liveOnTap();
+        const res = await liveOnTap();
+        items = res.value;
+        checkedAt = new Date(res.at).toISOString();
       } catch {
         return ok('The live tap list is unavailable right now. Try find_drinks instead.', { onTap: [] });
       }
       if (barObj) items = items.filter((t) => t.barSlug === barObj.slug);
       if (items.length === 0) {
-        return ok(`Nothing is on tap${barObj ? ` at ${barObj.name}` : ''} right now.`, { onTap: [] });
+        return ok(`Nothing is on tap${barObj ? ` at ${barObj.name}` : ''} right now.`, { onTap: [], checkedAt });
       }
       const byBar = new Map();
       for (const t of items) {
@@ -254,6 +278,7 @@ export function registerTools(server) {
       }
       return ok(`On tap now — ${parts.join('. ')}.`, {
         bar: barObj?.slug || null,
+        source: 'live', checkedAt,
         onTap: items.map((t) => ({
           name: label(t), kind: t.kind, bar: t.barName, abv: t.abv,
           price: t.price, priceLabel: money(t.price),

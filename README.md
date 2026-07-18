@@ -54,7 +54,7 @@ docker run -p 8787:8787 emf-bar-mcp
 |------|------|-----------|---------|
 | `list_bars` | — | no | The 3 bars (slug, name, drink count, map link) + open/closed now |
 | `find_drinks` | `query` (1–2 keywords), `bar?`, `category?`, `include_unavailable?`, `limit?` | no | Ranked drinks: `id`, `name`, `abv`, `price`, `category`, `bars`, dietary flags |
-| `check_stock` | `drink` (name or `id`), `bar?` | **1** | `inStock`, `level`, `servingsLeft`, `caskRemainingPct`, `price`, `bars`, cask/pump lines |
+| `check_stock` | `drink` (name or `id`), `bar?` | **1** | `inStock`, `level`, `servingsRemaining`+`servingUnit`, `percentRemaining`, `containerPercentRemaining` (cask/keg), `price`, `bars`, plus `source`/`live`/`checkedAt` freshness |
 | `whats_on_tap` | `bar?` | **1** (cached) | Casks/kegs/ciders pouring now, each with `remainingPct` / `level` |
 
 Every tool returns a short spoken‑style `content` string **and** machine‑readable

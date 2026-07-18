@@ -4,18 +4,21 @@ import { config } from './config.js';
 import { getStocktype, getOnTap, getCybarOnTap, getSessions } from './emfApi.js';
 import { toNum } from './format.js';
 
+// Returns { value, at, fresh } — `at` is when the data was actually fetched
+// upstream (ms epoch), so callers can report data freshness truthfully.
 function ttlCache(fn, ttlMs) {
   const store = new Map(); // key -> { at, value }
   const inflight = new Map();
   return async (key = '_') => {
     const hit = store.get(key);
-    if (hit && Date.now() - hit.at < ttlMs) return hit.value;
+    if (hit && Date.now() - hit.at < ttlMs) return { value: hit.value, at: hit.at, fresh: false };
     if (inflight.has(key)) return inflight.get(key);
     const p = (async () => {
       try {
         const value = await fn(key);
-        store.set(key, { at: Date.now(), value });
-        return value;
+        const at = Date.now();
+        store.set(key, { at, value });
+        return { value, at, fresh: true };
       } finally {
         inflight.delete(key);
       }
