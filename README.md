@@ -23,7 +23,7 @@ npm start                 # HTTP server on http://0.0.0.0:8787/mcp  (default)
 npm run stdio             # stdio transport, for desktop MCP clients
 ```
 
-Health check: `curl localhost:8787/healthz`
+Health check: `curl localhost:8787/health`
 
 ### Docker
 

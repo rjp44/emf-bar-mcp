@@ -36,7 +36,8 @@ async function startHttp() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
-  app.get('/healthz', (_req, res) => {
+  // Note: Cloud Run's frontend reserves /healthz, so use /health.
+  app.get('/health', (_req, res) => {
     const s = getState();
     res.json({
       ok: s.drinks.length > 0,

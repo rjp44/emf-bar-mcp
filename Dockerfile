@@ -15,9 +15,9 @@ COPY src ./src
 
 EXPOSE 8787
 
-# Warms the catalog on boot; container is ready once /healthz reports ok.
+# Warms the catalog on boot; container is ready once /health reports ok.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \
-  CMD wget -qO- http://127.0.0.1:8787/healthz | grep -q '"ok":true' || exit 1
+  CMD wget -qO- http://127.0.0.1:8787/health | grep -q '"ok":true' || exit 1
 
 USER node
 CMD ["node", "src/index.js"]
